@@ -18,9 +18,9 @@
  * grace timer; the registry is kind-agnostic.
  */
 
-import { createDebugLogger } from '../../utils/debugLogger.js';
-import { escapeXml } from '../../utils/xml.js';
-import { patchAgentMeta } from '../agent-transcript.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { escapeXml } from '../utils/xml.js';
+import { patchAgentMeta } from '../agents/agent-transcript.js';
 import type { TaskBase, TaskRegistration, TaskStatus } from './types.js';
 import type { TaskRegistry } from './registry.js';
 import type { Task } from './dispatcher.js';

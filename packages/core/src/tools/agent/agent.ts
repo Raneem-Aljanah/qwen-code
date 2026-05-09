@@ -76,7 +76,7 @@ import {
   agentRegister,
   agentUnregisterForeground,
   getAgentTask,
-} from '../../agents/tasks/agent-task.js';
+} from '../../tasks/agent-task.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
 
 function persistBackgroundCancellation(
