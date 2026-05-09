@@ -29,6 +29,7 @@ import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
 import {
   writeCodingPlanConfig,
+  writeTokenPlanConfig,
   writeModelProvidersConfig,
   readQwenSettingsForVSCode,
   clearPersistedAuth,
@@ -1059,6 +1060,14 @@ export class WebViewProvider {
     try {
       const provider = config.get<string>('provider', 'coding-plan');
 
+      if (provider === 'token-plan') {
+        writeTokenPlanConfig(apiKey);
+        console.log(
+          '[WebViewProvider] Synced VSCode settings → ~/.qwen/settings.json (provider=token-plan)',
+        );
+        return true;
+      }
+
       if (provider !== 'coding-plan') {
         console.log(
           '[WebViewProvider] Skipping VSCode settings sync for api-key provider; interactive auth owns provider details',
@@ -1327,6 +1336,8 @@ export class WebViewProvider {
     try {
       if (provider === 'coding-plan') {
         writeCodingPlanConfig(region === 'global' ? 'global' : 'china', apiKey);
+      } else if (provider === 'token-plan') {
+        writeTokenPlanConfig(apiKey);
       } else if (provider === 'alibaba-standard') {
         // Alibaba Standard — multiple models sharing the same base URL
         const modelBaseUrl =

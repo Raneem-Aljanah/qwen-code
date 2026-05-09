@@ -159,8 +159,9 @@ export class AuthMessageHandler extends BaseMessageHandler {
   /**
    * Handle auth — full interactive auth flow.
    *
-   * Tree (mirrors CLI AuthDialog):
+   * Tree (mirrors CLI AuthDialog alibaba group):
    *   |- Coding Plan -> Region (China/Global) -> API Key -> done
+   *   |- Token Plan -> API Key -> done
    *   \- API Key
    *      |- Alibaba Standard -> Region (4 regions) -> API Key -> Model IDs -> done
    *      \- Custom -> Base URL -> API Key -> Model -> done
@@ -177,6 +178,11 @@ export class AuthMessageHandler extends BaseMessageHandler {
             value: 'coding-plan' as const,
           },
           {
+            label: 'Alibaba Cloud Token Plan',
+            description: 'For teams · Usage-based billing · Dedicated endpoint',
+            value: 'token-plan' as const,
+          },
+          {
             label: 'API Key',
             description: 'Bring your own API key',
             value: 'api-key' as const,
@@ -191,6 +197,8 @@ export class AuthMessageHandler extends BaseMessageHandler {
 
       if (provider === 'coding-plan') {
         await this.authCodingPlan();
+      } else if (provider === 'token-plan') {
+        await this.authTokenPlan();
       } else {
         await this.authApiKey();
       }
@@ -241,6 +249,26 @@ export class AuthMessageHandler extends BaseMessageHandler {
 
     if (this.authInteractiveHandler) {
       await this.authInteractiveHandler('coding-plan', region, apiKey);
+    }
+  }
+
+  /**
+   * Token Plan: API key -> connect. Fixed endpoint, no region selection.
+   */
+  private async authTokenPlan(): Promise<void> {
+    const apiKey = await this.input({
+      title: 'Qwen Code: Token Plan API Key',
+      prompt: 'Enter your Token Plan API key',
+      placeHolder: 'sk-...',
+      password: true,
+      required: true,
+    });
+    if (!apiKey) {
+      return;
+    }
+
+    if (this.authInteractiveHandler) {
+      await this.authInteractiveHandler('token-plan', undefined, apiKey);
     }
   }
 
