@@ -50,6 +50,8 @@ import {
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
   generateToolUseSummary,
+  setAgentNotificationCallback,
+  setMonitorNotificationCallback,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -2267,8 +2269,7 @@ export const useGeminiStream = (
 
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
-    const registry = config.getBackgroundTaskRegistry();
-    registry.setNotificationCallback((displayText, modelText) => {
+    setAgentNotificationCallback((displayText, modelText) => {
       notificationQueueRef.current.push({
         displayText,
         modelText,
@@ -2277,14 +2278,13 @@ export const useGeminiStream = (
       setNotificationTrigger((n) => n + 1);
     });
     return () => {
-      registry.setNotificationCallback(undefined);
+      setAgentNotificationCallback(undefined);
     };
   }, [config]);
 
   // Register monitor notification callback onto the shared queue.
   useEffect(() => {
-    const registry = config.getMonitorRegistry();
-    registry.setNotificationCallback((displayText, modelText) => {
+    setMonitorNotificationCallback((displayText, modelText) => {
       notificationQueueRef.current.push({
         displayText,
         modelText,
@@ -2293,7 +2293,7 @@ export const useGeminiStream = (
       setNotificationTrigger((n) => n + 1);
     });
     return () => {
-      registry.setNotificationCallback(undefined);
+      setMonitorNotificationCallback(undefined);
     };
   }, [config]);
 

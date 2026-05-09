@@ -35,7 +35,14 @@ import type {
   ShellOutputEvent,
 } from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
-import type { ShellTaskRegistration } from '../services/backgroundShellRegistry.js';
+import {
+  getShellTask,
+  shellCancel,
+  shellComplete,
+  shellFail,
+  shellRegister,
+  type ShellTaskRegistration,
+} from '../agents/tasks/shell-task.js';
 import stripAnsi from 'strip-ansi';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
@@ -1978,8 +1985,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
     );
 
     if (pid !== undefined) registration.pid = pid;
-    const registry = this.config.getBackgroundShellRegistry();
-    registry.register(registration);
+    const registry = this.config.getTaskRegistry();
+    shellRegister(registry, registration);
 
     // Settle in the background — do NOT await here, the agent should be
     // unblocked immediately.
@@ -1988,8 +1995,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
         outputStream.end();
         const endTime = Date.now();
         if (entryAc.signal.aborted) {
-          if (registry.get(shellId)?.status === 'running') {
-            registry.cancel(shellId, endTime);
+          if (getShellTask(registry, shellId)?.status === 'running') {
+            shellCancel(registry, shellId, endTime);
           }
         } else if (
           result.error ||
@@ -2005,14 +2012,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
             : result.signal !== null
               ? `terminated by signal ${result.signal}`
               : `exited with code ${result.exitCode}`;
-          registry.fail(shellId, reason, endTime);
+          shellFail(registry, shellId, reason, endTime);
         } else {
-          registry.complete(shellId, result.exitCode ?? 0, endTime);
+          shellComplete(registry, shellId, result.exitCode ?? 0, endTime);
         }
       },
       (err) => {
         outputStream.end();
-        registry.fail(shellId, getErrorMessage(err), Date.now());
+        shellFail(registry, shellId, getErrorMessage(err), Date.now());
       },
     );
 

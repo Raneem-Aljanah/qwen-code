@@ -67,6 +67,16 @@ import {
   patchAgentMeta,
   writeAgentMeta,
 } from '../../agents/agent-transcript.js';
+import {
+  agentAppendActivity,
+  agentComplete,
+  agentDrainMessages,
+  agentFail,
+  agentFinalizeCancelled,
+  agentRegister,
+  agentUnregisterForeground,
+  getAgentTask,
+} from '../../agents/tasks/agent-task.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
 
 function persistBackgroundCancellation(
@@ -1183,7 +1193,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           bgTaskPrompt = this.params.prompt;
         }
 
-        const registry = this.config.getBackgroundTaskRegistry();
+        const registry = this.config.getTaskRegistry();
 
         const projectDir = this.config.storage.getProjectDir();
         const sessionId = this.config.getSessionId();
@@ -1239,7 +1249,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           agentColor: subagentConfig.color,
           resumeCount: 0,
         });
-        registry.register({
+        agentRegister(registry, {
           agentId: hookOpts.agentId,
           description: this.params.description,
           subagentType: subagentConfig.name,
@@ -1267,7 +1277,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // rows the user actually sees.
         let liveToolCallCount = 0;
         const refreshLiveStats = () => {
-          const entry = registry.get(hookOpts.agentId);
+          const entry = getAgentTask(registry, hookOpts.agentId);
           if (!entry || entry.status !== 'running') return;
           const summary = bgSubagent.getExecutionSummary();
           entry.stats = {
@@ -1279,7 +1289,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const onToolCall = (event: AgentToolCallEvent) => {
           liveToolCallCount += 1;
           refreshLiveStats();
-          registry.appendActivity(hookOpts.agentId, {
+          agentAppendActivity(registry, hookOpts.agentId, {
             name: event.name,
             description: event.description,
             at: event.timestamp,
@@ -1294,7 +1304,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // Wire external message drain so SendMessage can inject messages
         // into this agent's reasoning loop between tool rounds.
         bgSubagent.setExternalMessageProvider(() =>
-          registry.drainMessages(hookOpts.agentId),
+          agentDrainMessages(registry, hookOpts.agentId),
         );
 
         const getCompletionStats = () => {
@@ -1335,25 +1345,32 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             const finalText = bgSubagent.getFinalText();
             const completionStats = getCompletionStats();
             if (terminateMode === AgentTerminateMode.GOAL) {
-              registry.complete(hookOpts.agentId, finalText, completionStats);
+              agentComplete(
+                registry,
+                hookOpts.agentId,
+                finalText,
+                completionStats,
+              );
               patchAgentMeta(metaPath, {
                 status: 'completed',
                 lastUpdatedAt: new Date().toISOString(),
                 lastError: undefined,
               });
             } else if (terminateMode === AgentTerminateMode.CANCELLED) {
-              registry.finalizeCancelled(
+              agentFinalizeCancelled(
+                registry,
                 hookOpts.agentId,
                 finalText,
                 completionStats,
               );
               persistBackgroundCancellation(
                 metaPath,
-                registry.get(hookOpts.agentId)?.persistedCancellationStatus ??
-                  'cancelled',
+                getAgentTask(registry, hookOpts.agentId)
+                  ?.persistedCancellationStatus ?? 'cancelled',
               );
             } else {
-              registry.fail(
+              agentFail(
+                registry,
                 hookOpts.agentId,
                 finalText || `Agent terminated with mode: ${terminateMode}`,
                 completionStats,
@@ -1374,18 +1391,24 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // status so the model's notification matches what task_stop
             // requested rather than reporting it as a generic failure.
             if (bgAbortController.signal.aborted) {
-              registry.finalizeCancelled(
+              agentFinalizeCancelled(
+                registry,
                 hookOpts.agentId,
                 errorMsg,
                 getCompletionStats(),
               );
               persistBackgroundCancellation(
                 metaPath,
-                registry.get(hookOpts.agentId)?.persistedCancellationStatus ??
-                  'cancelled',
+                getAgentTask(registry, hookOpts.agentId)
+                  ?.persistedCancellationStatus ?? 'cancelled',
               );
             } else {
-              registry.fail(hookOpts.agentId, errorMsg, getCompletionStats());
+              agentFail(
+                registry,
+                hookOpts.agentId,
+                errorMsg,
+                getCompletionStats(),
+              );
               patchAgentMeta(metaPath, {
                 status: 'failed',
                 lastUpdatedAt: new Date().toISOString(),
@@ -1490,7 +1513,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // as their backgrounded counterparts. Without this, post-mortem of a
       // cancelled / crashed foreground subagent has no on-disk evidence
       // beyond what made it into the parent's tool result.
-      const registry = this.config.getBackgroundTaskRegistry();
+      const registry = this.config.getTaskRegistry();
       const fgProjectDir = this.config.storage.getProjectDir();
       const fgSessionId = this.config.getSessionId();
       const fgJsonlPath = getAgentJsonlPath(
@@ -1524,7 +1547,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // know the flavor or the registry id, so folding them is awkward.
       let fgLiveToolCallCount = 0;
       const refreshFgLiveStats = () => {
-        const entry = registry.get(hookOpts.agentId);
+        const entry = getAgentTask(registry, hookOpts.agentId);
         if (!entry || entry.status !== 'running') return;
         const summary = subagent.getExecutionSummary();
         entry.stats = {
@@ -1537,7 +1560,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const event = args[0] as AgentToolCallEvent;
         fgLiveToolCallCount += 1;
         refreshFgLiveStats();
-        registry.appendActivity(hookOpts.agentId, {
+        agentAppendActivity(registry, hookOpts.agentId, {
           name: event.name,
           description: event.description,
           at: event.timestamp,
@@ -1581,7 +1604,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           agentColor: subagentConfig.color,
           resumeCount: 0,
         });
-        registry.register({
+        agentRegister(registry, {
           agentId: hookOpts.agentId,
           description: this.params.description,
           subagentType: hookOpts.agentType,
@@ -1662,7 +1685,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // returns — the parent's tool-result is the durable record. Doing
         // this in finally guarantees we clean up on success, failure,
         // cancel, AND any unexpected throw inside runFramed.
-        registry.unregisterForeground(hookOpts.agentId);
+        agentUnregisterForeground(registry, hookOpts.agentId);
         // Release the per-subagent ToolRegistry so any AgentTool /
         // SkillTool the model instantiated during execution disposes
         // its change-listeners on shared SubagentManager / SkillManager.

@@ -6,6 +6,50 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SendMessageType, type Config } from '@qwen-code/qwen-code-core';
+
+// Hoisted mocks for the kind-local helpers session.ts now imports
+// from core. The setNotificationCallback/setRegisterCallback mocks
+// store the callback so tests can invoke it with synthetic events.
+const monitorRegisterCb = vi.hoisted(() => ({
+  current: undefined as ((entry: unknown) => void) | undefined,
+}));
+const monitorNotificationCb = vi.hoisted(() => ({
+  current: undefined as
+    | ((displayText: string, modelText: string, meta: unknown) => void)
+    | undefined,
+}));
+const mockSetMonitorRegisterCallback = vi.hoisted(() =>
+  vi.fn((cb: ((entry: unknown) => void) | undefined) => {
+    monitorRegisterCb.current = cb ?? undefined;
+  }),
+);
+const mockSetMonitorNotificationCallback = vi.hoisted(() =>
+  vi.fn(
+    (
+      cb:
+        | ((displayText: string, modelText: string, meta: unknown) => void)
+        | undefined,
+    ) => {
+      monitorNotificationCb.current = cb ?? undefined;
+    },
+  ),
+);
+const mockMonitorAbortAll = vi.hoisted(() => vi.fn());
+const mockShellAbortAll = vi.hoisted(() => vi.fn());
+const mockAgentAbortAll = vi.hoisted(() => vi.fn());
+
+vi.mock('@qwen-code/qwen-code-core', async () => {
+  const actual = await vi.importActual('@qwen-code/qwen-code-core');
+  return {
+    ...actual,
+    setMonitorRegisterCallback: mockSetMonitorRegisterCallback,
+    setMonitorNotificationCallback: mockSetMonitorNotificationCallback,
+    monitorAbortAll: mockMonitorAbortAll,
+    shellAbortAll: mockShellAbortAll,
+    agentAbortAll: mockAgentAbortAll,
+  };
+});
+
 import { runNonInteractiveStreamJson } from './session.js';
 import type {
   CLIUserMessage,
@@ -56,16 +100,17 @@ interface ConfigOverrides {
   [key: string]: unknown;
 }
 
-let mockMonitorRegistry: {
-  setNotificationCallback: ReturnType<typeof vi.fn>;
-  setRegisterCallback: ReturnType<typeof vi.fn>;
-  abortAll: ReturnType<typeof vi.fn>;
-};
-let mockBackgroundShellRegistry: {
-  abortAll: ReturnType<typeof vi.fn>;
-};
-let mockBackgroundTaskRegistry: {
-  abortAll: ReturnType<typeof vi.fn>;
+// Stub TaskRegistry exposing the narrow surface session.ts uses (none
+// directly — it only invokes the kind-local abort helpers from core).
+let mockTaskRegistry: {
+  getAll: () => unknown[];
+  getByKind: () => unknown[];
+  get: () => unknown;
+  register: () => unknown;
+  update: () => unknown;
+  evict: () => unknown;
+  kill: () => unknown;
+  subscribe: () => () => void;
 };
 
 function createConfig(overrides: ConfigOverrides = {}): Config {
@@ -77,9 +122,7 @@ function createConfig(overrides: ConfigOverrides = {}): Config {
     getApprovalMode: () => 'auto',
     getOutputFormat: () => 'stream-json',
     initialize: vi.fn(),
-    getMonitorRegistry: () => mockMonitorRegistry,
-    getBackgroundShellRegistry: () => mockBackgroundShellRegistry,
-    getBackgroundTaskRegistry: () => mockBackgroundTaskRegistry,
+    getTaskRegistry: () => mockTaskRegistry,
   };
   return { ...base, ...overrides } as unknown as Config;
 }
@@ -173,17 +216,23 @@ describe('runNonInteractiveStreamJson', () => {
     };
   };
   beforeEach(() => {
-    mockMonitorRegistry = {
-      setNotificationCallback: vi.fn(),
-      setRegisterCallback: vi.fn(),
-      abortAll: vi.fn(),
+    mockTaskRegistry = {
+      getAll: () => [],
+      getByKind: () => [],
+      get: () => undefined,
+      register: () => undefined,
+      update: () => undefined,
+      evict: () => undefined,
+      kill: () => undefined,
+      subscribe: () => () => {},
     };
-    mockBackgroundShellRegistry = {
-      abortAll: vi.fn(),
-    };
-    mockBackgroundTaskRegistry = {
-      abortAll: vi.fn(),
-    };
+    mockSetMonitorRegisterCallback.mockClear();
+    mockSetMonitorNotificationCallback.mockClear();
+    mockMonitorAbortAll.mockClear();
+    mockShellAbortAll.mockClear();
+    mockAgentAbortAll.mockClear();
+    monitorRegisterCb.current = undefined;
+    monitorNotificationCb.current = undefined;
     config = createConfig();
     runNonInteractiveMock.mockReset();
 
@@ -314,10 +363,10 @@ describe('runNonInteractiveStreamJson', () => {
           },
         ) => void)
       | undefined;
-    mockMonitorRegistry.setRegisterCallback.mockImplementation((cb) => {
+    mockSetMonitorRegisterCallback.mockImplementation((cb) => {
       registerCallback = cb;
     });
-    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+    mockSetMonitorNotificationCallback.mockImplementation((cb) => {
       monitorCallback = cb;
     });
 
@@ -420,10 +469,10 @@ describe('runNonInteractiveStreamJson', () => {
         ) => void)
       | undefined;
 
-    mockMonitorRegistry.setRegisterCallback.mockImplementation((cb) => {
+    mockSetMonitorRegisterCallback.mockImplementation((cb) => {
       registerCallback = cb;
     });
-    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+    mockSetMonitorNotificationCallback.mockImplementation((cb) => {
       notificationCallback = cb;
     });
 
@@ -479,10 +528,10 @@ describe('runNonInteractiveStreamJson', () => {
 
     closeInput?.();
     await vi.waitFor(() => {
-      expect(
-        mockMonitorRegistry.setNotificationCallback,
-      ).toHaveBeenLastCalledWith(undefined);
-      expect(mockMonitorRegistry.setRegisterCallback).toHaveBeenLastCalledWith(
+      expect(mockSetMonitorNotificationCallback).toHaveBeenLastCalledWith(
+        undefined,
+      );
+      expect(mockSetMonitorRegisterCallback).toHaveBeenLastCalledWith(
         undefined,
       );
     });
@@ -516,13 +565,11 @@ describe('runNonInteractiveStreamJson', () => {
     );
     expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
 
-    const clearCalls = mockMonitorRegistry.setNotificationCallback.mock.calls
+    const clearCalls = mockSetMonitorNotificationCallback.mock.calls
       .map(([cb]) => cb)
       .filter((cb) => cb === undefined);
     expect(clearCalls).toHaveLength(1);
-    expect(mockMonitorRegistry.setRegisterCallback).toHaveBeenLastCalledWith(
-      undefined,
-    );
+    expect(mockSetMonitorRegisterCallback).toHaveBeenLastCalledWith(undefined);
   });
 
   it('enqueues user messages received during processing', async () => {
@@ -842,9 +889,9 @@ describe('runNonInteractiveStreamJson', () => {
 
     await runNonInteractiveStreamJson(config, '');
 
-    expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(2);
-    expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(2);
-    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledTimes(2);
+    expect(mockMonitorAbortAll).toHaveBeenCalledTimes(2);
+    expect(mockShellAbortAll).toHaveBeenCalledTimes(2);
+    expect(mockAgentAbortAll).toHaveBeenCalledTimes(2);
   });
 
   it('aborts background registries on error shutdown', async () => {
@@ -858,9 +905,9 @@ describe('runNonInteractiveStreamJson', () => {
       'Stream error',
     );
 
-    expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(2);
-    expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(2);
-    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledTimes(2);
+    expect(mockMonitorAbortAll).toHaveBeenCalledTimes(2);
+    expect(mockShellAbortAll).toHaveBeenCalledTimes(2);
+    expect(mockAgentAbortAll).toHaveBeenCalledTimes(2);
   });
 
   it('runs final background cleanup after in-flight processing drains', async () => {
@@ -869,13 +916,13 @@ describe('runNonInteractiveStreamJson', () => {
     let releaseProcessing: (() => void) | undefined;
     const callOrder: string[] = [];
 
-    mockMonitorRegistry.abortAll.mockImplementation(() => {
+    mockMonitorAbortAll.mockImplementation(() => {
       callOrder.push('monitor:abortAll');
     });
-    mockBackgroundShellRegistry.abortAll.mockImplementation(() => {
+    mockShellAbortAll.mockImplementation(() => {
       callOrder.push('background:abortAll');
     });
-    mockBackgroundTaskRegistry.abortAll.mockImplementation(() => {
+    mockAgentAbortAll.mockImplementation(() => {
       callOrder.push('agent:abortAll');
     });
 
@@ -900,9 +947,9 @@ describe('runNonInteractiveStreamJson', () => {
       expect(releaseProcessing).toBeDefined();
     });
 
-    expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(1);
-    expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(1);
-    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledTimes(1);
+    expect(mockMonitorAbortAll).toHaveBeenCalledTimes(1);
+    expect(mockShellAbortAll).toHaveBeenCalledTimes(1);
+    expect(mockAgentAbortAll).toHaveBeenCalledTimes(1);
     expect(callOrder).toContain('run:start');
     expect(callOrder).toContain('monitor:abortAll');
     expect(callOrder).toContain('background:abortAll');
@@ -911,9 +958,9 @@ describe('runNonInteractiveStreamJson', () => {
     releaseProcessing?.();
     await sessionPromise;
 
-    expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(2);
-    expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(2);
-    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledTimes(2);
+    expect(mockMonitorAbortAll).toHaveBeenCalledTimes(2);
+    expect(mockShellAbortAll).toHaveBeenCalledTimes(2);
+    expect(mockAgentAbortAll).toHaveBeenCalledTimes(2);
     expect(callOrder.slice(-4)).toEqual([
       'run:end',
       'monitor:abortAll',
@@ -929,13 +976,13 @@ describe('runNonInteractiveStreamJson', () => {
     const callOrder: string[] = [];
     const streamError = new Error('Stream error');
 
-    mockMonitorRegistry.abortAll.mockImplementation(() => {
+    mockMonitorAbortAll.mockImplementation(() => {
       callOrder.push('monitor:abortAll');
     });
-    mockBackgroundShellRegistry.abortAll.mockImplementation(() => {
+    mockShellAbortAll.mockImplementation(() => {
       callOrder.push('background:abortAll');
     });
-    mockBackgroundTaskRegistry.abortAll.mockImplementation(() => {
+    mockAgentAbortAll.mockImplementation(() => {
       callOrder.push('agent:abortAll');
     });
 
@@ -961,17 +1008,17 @@ describe('runNonInteractiveStreamJson', () => {
       expect(releaseProcessing).toBeDefined();
     });
 
-    expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(1);
-    expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(1);
-    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledTimes(1);
+    expect(mockMonitorAbortAll).toHaveBeenCalledTimes(1);
+    expect(mockShellAbortAll).toHaveBeenCalledTimes(1);
+    expect(mockAgentAbortAll).toHaveBeenCalledTimes(1);
     expect(callOrder).toContain('run:start');
 
     releaseProcessing?.();
     await expect(sessionPromise).rejects.toThrow('Stream error');
 
-    expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(2);
-    expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalledTimes(2);
-    expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledTimes(2);
+    expect(mockMonitorAbortAll).toHaveBeenCalledTimes(2);
+    expect(mockShellAbortAll).toHaveBeenCalledTimes(2);
+    expect(mockAgentAbortAll).toHaveBeenCalledTimes(2);
     expect(callOrder.slice(-4)).toEqual([
       'run:end',
       'monitor:abortAll',

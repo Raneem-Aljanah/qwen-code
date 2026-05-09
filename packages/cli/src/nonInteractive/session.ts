@@ -8,7 +8,15 @@ import type {
   Config,
   ConfigInitializeOptions,
 } from '@qwen-code/qwen-code-core';
-import { createDebugLogger, SendMessageType } from '@qwen-code/qwen-code-core';
+import {
+  agentAbortAll,
+  createDebugLogger,
+  monitorAbortAll,
+  SendMessageType,
+  setMonitorNotificationCallback,
+  setMonitorRegisterCallback,
+  shellAbortAll,
+} from '@qwen-code/qwen-code-core';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
 import { ControlContext } from './control/ControlContext.js';
@@ -143,8 +151,7 @@ class Session {
       return;
     }
 
-    const registry = this.config.getMonitorRegistry();
-    registry.setNotificationCallback((displayText, modelText, meta) => {
+    setMonitorNotificationCallback((displayText, modelText, meta) => {
       if (this.isShuttingDown || this.abortController.signal.aborted) {
         return;
       }
@@ -166,8 +173,7 @@ class Session {
       return;
     }
 
-    const registry = this.config.getMonitorRegistry();
-    registry.setRegisterCallback((entry) => {
+    setMonitorRegisterCallback((entry) => {
       if (this.isShuttingDown || this.abortController.signal.aborted) {
         return;
       }
@@ -619,9 +625,10 @@ class Session {
   }
 
   private abortTaskRegistries(): void {
-    this.config.getMonitorRegistry().abortAll({ notify: false });
-    this.config.getBackgroundShellRegistry().abortAll();
-    this.config.getBackgroundTaskRegistry().abortAll();
+    const registry = this.config.getTaskRegistry();
+    monitorAbortAll(registry, { notify: false });
+    shellAbortAll(registry);
+    agentAbortAll(registry);
   }
 
   private finishShutdown(): void {
@@ -637,13 +644,12 @@ class Session {
       return;
     }
 
-    const registry = this.config.getMonitorRegistry();
     if (this.monitorNotificationsRegistered) {
-      registry.setNotificationCallback(undefined);
+      setMonitorNotificationCallback(undefined);
       this.monitorNotificationsRegistered = false;
     }
     if (this.monitorRegistrationsRegistered) {
-      registry.setRegisterCallback(undefined);
+      setMonitorRegisterCallback(undefined);
       this.monitorRegistrationsRegistered = false;
     }
   }

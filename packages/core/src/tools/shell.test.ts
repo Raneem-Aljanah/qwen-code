@@ -27,6 +27,7 @@ import { ShellTool } from './shell.js';
 import { detectBlockedSleepPattern } from './shell.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { type Config } from '../config/config.js';
+import * as shellTaskModule from '../agents/tasks/shell-task.js';
 import {
   type ShellExecutionResult,
   type ShellOutputEvent,
@@ -77,15 +78,31 @@ describe('ShellTool', () => {
         email: 'qwen-coder@alibabacloud.com',
       }),
       getShouldUseNodePtyShell: vi.fn().mockReturnValue(false),
-      getBackgroundShellRegistry: vi.fn().mockReturnValue({
+      // Real TaskRegistry — shell-task helpers operate on it directly.
+      // Tests use vi.spyOn against the shell-task module to assert
+      // register/complete/fail/cancel calls.
+      getTaskRegistry: vi.fn().mockReturnValue({
         register: vi.fn(),
         get: vi.fn(),
         getAll: vi.fn().mockReturnValue([]),
-        cancel: vi.fn(),
-        complete: vi.fn(),
-        fail: vi.fn(),
+        getByKind: vi.fn().mockReturnValue([]),
+        update: vi.fn((id: string, updater: (t: unknown) => unknown) =>
+          updater({}),
+        ),
+        evict: vi.fn(),
+        kill: vi.fn(),
+        subscribe: vi.fn(() => () => {}),
       }),
     } as unknown as Config;
+
+    // Reset shell-task module spies between tests
+    vi.spyOn(shellTaskModule, 'shellRegister').mockImplementation(
+      (_reg, e) => e as never,
+    );
+    vi.spyOn(shellTaskModule, 'shellComplete').mockImplementation(() => {});
+    vi.spyOn(shellTaskModule, 'shellFail').mockImplementation(() => {});
+    vi.spyOn(shellTaskModule, 'shellCancel').mockImplementation(() => {});
+    vi.spyOn(shellTaskModule, 'getShellTask').mockReturnValue(undefined);
 
     // executeBackground writes to disk; stub mkdirSync + createWriteStream.
     vi.mocked(fs.mkdirSync).mockReturnValue(undefined);
@@ -296,7 +313,6 @@ describe('ShellTool', () => {
     };
 
     it('runs background commands as managed pool entries (no & / pgrep wrap)', async () => {
-      const registry = mockConfig.getBackgroundShellRegistry();
       const invocation = shellTool.build({
         command: 'npm start',
         is_background: true,
@@ -317,8 +333,8 @@ describe('ShellTool', () => {
         { streamStdout: true },
       );
       // Entry registered with the spawn pid.
-      expect(registry.register).toHaveBeenCalledTimes(1);
-      const entry = (registry.register as Mock).mock.calls[0][0];
+      expect(shellTaskModule.shellRegister).toHaveBeenCalledTimes(1);
+      const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
       expect(entry.command).toBe('npm start');
       expect(entry.cwd).toBe('/test/dir');
       expect(entry.status).toBe('running');
@@ -331,13 +347,12 @@ describe('ShellTool', () => {
     });
 
     it('settles a background entry as completed when the process exits cleanly', async () => {
-      const registry = mockConfig.getBackgroundShellRegistry();
       const invocation = shellTool.build({
         command: 'true',
         is_background: true,
       });
       await invocation.execute(mockAbortSignal);
-      const entry = (registry.register as Mock).mock.calls[0][0];
+      const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
 
       resolveExecutionPromise({
         rawOutput: Buffer.from(''),
@@ -352,23 +367,23 @@ describe('ShellTool', () => {
       // Flush the .then() microtask attached to resultPromise.
       await new Promise((r) => setImmediate(r));
 
-      expect(registry.complete).toHaveBeenCalledWith(
+      expect(shellTaskModule.shellComplete).toHaveBeenCalledWith(
+        expect.anything(),
         entry.shellId,
         0,
         expect.any(Number),
       );
-      expect(registry.fail).not.toHaveBeenCalled();
-      expect(registry.cancel).not.toHaveBeenCalled();
+      expect(shellTaskModule.shellFail).not.toHaveBeenCalled();
+      expect(shellTaskModule.shellCancel).not.toHaveBeenCalled();
     });
 
     it('settles a background entry as failed when ShellExecutionService reports error', async () => {
-      const registry = mockConfig.getBackgroundShellRegistry();
       const invocation = shellTool.build({
         command: 'no-such-command',
         is_background: true,
       });
       await invocation.execute(mockAbortSignal);
-      const entry = (registry.register as Mock).mock.calls[0][0];
+      const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
 
       resolveExecutionPromise({
         rawOutput: Buffer.from(''),
@@ -382,22 +397,22 @@ describe('ShellTool', () => {
       });
       await new Promise((r) => setImmediate(r));
 
-      expect(registry.fail).toHaveBeenCalledWith(
+      expect(shellTaskModule.shellFail).toHaveBeenCalledWith(
+        expect.anything(),
         entry.shellId,
         'spawn ENOENT',
         expect.any(Number),
       );
-      expect(registry.complete).not.toHaveBeenCalled();
+      expect(shellTaskModule.shellComplete).not.toHaveBeenCalled();
     });
 
     it('settles a background entry as failed on non-zero exit code (no error object)', async () => {
-      const registry = mockConfig.getBackgroundShellRegistry();
       const invocation = shellTool.build({
         command: 'false',
         is_background: true,
       });
       await invocation.execute(mockAbortSignal);
-      const entry = (registry.register as Mock).mock.calls[0][0];
+      const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
 
       // ShellExecutionService reports a clean non-zero exit (no error object,
       // no signal) — historically this got bucketed as `completed`, which
@@ -414,12 +429,13 @@ describe('ShellTool', () => {
       });
       await new Promise((r) => setImmediate(r));
 
-      expect(registry.fail).toHaveBeenCalledWith(
+      expect(shellTaskModule.shellFail).toHaveBeenCalledWith(
+        expect.anything(),
         entry.shellId,
         expect.stringContaining('exited with code 1'),
         expect.any(Number),
       );
-      expect(registry.complete).not.toHaveBeenCalled();
+      expect(shellTaskModule.shellComplete).not.toHaveBeenCalled();
     });
 
     it('rejects a bare trailing & in managed background mode', async () => {

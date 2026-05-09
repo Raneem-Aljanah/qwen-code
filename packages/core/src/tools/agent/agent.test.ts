@@ -94,22 +94,33 @@ describe('AgentTool', () => {
     vi.useFakeTimers();
 
     // Create mock config. The outer describe covers foreground execution
-    // paths, which now register/unregister in the BackgroundTaskRegistry
-    // to surface the run in the pill+dialog. A no-op stub registry is
-    // enough for these tests — they don't assert on registry behavior.
+    // paths, which now register/unregister in the unified TaskRegistry to
+    // surface the run in the pill+dialog. The stub mirrors the registry's
+    // narrow public surface AND tracks registered entries in a Map so
+    // `get(id)` returns the same shape `agentUnregisterForeground` reads
+    // (it bails on missing entries before calling `evict`, so a bare
+    // `vi.fn()` for `get` would defeat the foreground-unregister test).
+    const stubEntries = new Map<string, unknown>();
     const stubRegistry = {
-      register: vi.fn(),
-      unregisterForeground: vi.fn(),
-      complete: vi.fn(),
-      fail: vi.fn(),
-      finalizeCancelled: vi.fn(),
-      finalizeCancellationIfPending: vi.fn(),
-      cancel: vi.fn(),
-      get: vi.fn(),
-      getAll: vi.fn().mockReturnValue([]),
-      drainMessages: vi.fn().mockReturnValue([]),
-      queueMessage: vi.fn(),
-      appendActivity: vi.fn(),
+      register: vi.fn((entry: { id: string }) => {
+        stubEntries.set(entry.id, entry);
+        return entry;
+      }),
+      get: vi.fn((id: string) => stubEntries.get(id)),
+      getAll: vi.fn(() => Array.from(stubEntries.values())),
+      getByKind: vi.fn(() => []),
+      update: vi.fn((id: string, updater: (t: unknown) => unknown) => {
+        const current = stubEntries.get(id);
+        if (!current) return undefined;
+        const next = updater(current);
+        if (next !== current) stubEntries.set(id, next);
+        return next;
+      }),
+      evict: vi.fn((id: string) => {
+        stubEntries.delete(id);
+      }),
+      kill: vi.fn(),
+      subscribe: vi.fn(() => () => {}),
     };
     // Stub registry exposed on both `parent.getToolRegistry()` and the
     // override built by `createApprovalModeOverride`. The override path
@@ -134,7 +145,7 @@ describe('AgentTool', () => {
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       isTrustedFolder: vi.fn().mockReturnValue(true),
-      getBackgroundTaskRegistry: vi.fn().mockReturnValue(stubRegistry),
+      getTaskRegistry: vi.fn().mockReturnValue(stubRegistry),
       getToolRegistry: vi.fn().mockReturnValue(stubToolRegistry),
       createToolRegistry: vi.fn().mockResolvedValue(stubToolRegistry),
       storage: {
@@ -1513,12 +1524,13 @@ describe('AgentTool', () => {
     let mockContextState: ContextState;
     let mockRegistry: {
       register: ReturnType<typeof vi.fn>;
-      unregisterForeground: ReturnType<typeof vi.fn>;
-      complete: ReturnType<typeof vi.fn>;
-      fail: ReturnType<typeof vi.fn>;
-      finalizeCancelled: ReturnType<typeof vi.fn>;
-      drainMessages: ReturnType<typeof vi.fn>;
-      appendActivity: ReturnType<typeof vi.fn>;
+      get: ReturnType<typeof vi.fn>;
+      getAll: ReturnType<typeof vi.fn>;
+      getByKind: ReturnType<typeof vi.fn>;
+      update: ReturnType<typeof vi.fn>;
+      evict: ReturnType<typeof vi.fn>;
+      kill: ReturnType<typeof vi.fn>;
+      subscribe: ReturnType<typeof vi.fn>;
     };
 
     const bgSubagent: SubagentConfig = {
@@ -1548,23 +1560,36 @@ describe('AgentTool', () => {
       mockContextState = { set: vi.fn() } as unknown as ContextState;
       MockedContextState.mockImplementation(() => mockContextState);
 
+      const innerEntries = new Map<string, unknown>();
       mockRegistry = {
-        register: vi.fn(),
-        unregisterForeground: vi.fn(),
-        complete: vi.fn(),
-        fail: vi.fn(),
-        finalizeCancelled: vi.fn(),
-        drainMessages: vi.fn().mockReturnValue([]),
-        appendActivity: vi.fn(),
+        register: vi.fn((entry: { id: string }) => {
+          innerEntries.set(entry.id, entry);
+          return entry;
+        }),
+        get: vi.fn((id: string) => innerEntries.get(id)),
+        getAll: vi.fn(() => Array.from(innerEntries.values())),
+        getByKind: vi.fn(() => []),
+        update: vi.fn((id: string, updater: (t: unknown) => unknown) => {
+          const current = innerEntries.get(id);
+          if (!current) return undefined;
+          const next = updater(current);
+          if (next !== current) innerEntries.set(id, next);
+          return next;
+        }),
+        evict: vi.fn((id: string) => {
+          innerEntries.delete(id);
+        }),
+        kill: vi.fn(),
+        subscribe: vi.fn(() => () => {}),
       };
 
       vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);
-      (config as unknown as Record<string, unknown>)[
-        'getBackgroundTaskRegistry'
-      ] = vi.fn().mockReturnValue(mockRegistry);
+      (config as unknown as Record<string, unknown>)['getTaskRegistry'] = vi
+        .fn()
+        .mockReturnValue(mockRegistry);
       (config as unknown as Record<string, unknown>)['storage'] = {
         getProjectDir: () => '/tmp/qwen-test',
       };
@@ -1602,7 +1627,13 @@ describe('AgentTool', () => {
         expect.objectContaining({
           description: 'Start monitor',
           subagentType: 'monitor',
-          status: 'running',
+          // status isn't asserted: vi.fn captures the entry by reference,
+          // so subsequent agentComplete mutations would mask the
+          // register-time 'running' status by the time this assertion
+          // runs. The test's intent — that register saw a backgrounded
+          // monitor with the right metadata — is captured by the
+          // surrounding fields.
+          isBackgrounded: true,
         }),
       );
       const display = result.returnDisplay as AgentResultDisplay;
@@ -1705,10 +1736,15 @@ describe('AgentTool', () => {
           isBackgrounded: false,
           description: 'Search files',
           subagentType: 'file-search',
-          status: 'running',
+          // See sibling test — status is not asserted because the spy
+          // captures the entry by reference and the foreground finally
+          // path mutates `notified`/`status` after register returns.
         }),
       );
-      expect(mockRegistry.unregisterForeground).toHaveBeenCalledWith(
+      // Foreground unregister now routes through TaskRegistry.evict()
+      // (called by agentUnregisterForeground) — registry.evict matches
+      // what the registry's narrow surface provides.
+      expect(mockRegistry.evict).toHaveBeenCalledWith(
         expect.stringContaining('file-search-'),
       );
     });

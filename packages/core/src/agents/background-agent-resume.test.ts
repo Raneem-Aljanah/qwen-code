@@ -9,7 +9,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
-import { BackgroundTaskRegistry } from './background-tasks.js';
+import { TaskRegistry } from './tasks/registry.js';
+import {
+  agentAbortAll,
+  agentCancel,
+  agentRegister,
+  getAgentTask,
+} from './tasks/agent-task.js';
 import { BackgroundAgentResumeService } from './background-agent-resume.js';
 import {
   getAgentJsonlPath,
@@ -26,11 +32,11 @@ import {
 
 describe('BackgroundAgentResumeService', () => {
   let tempDir: string;
-  let registry: BackgroundTaskRegistry;
+  let registry: TaskRegistry;
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bg-agent-resume-'));
-    registry = new BackgroundTaskRegistry();
+    registry = new TaskRegistry();
   });
 
   afterEach(() => {
@@ -73,7 +79,7 @@ describe('BackgroundAgentResumeService', () => {
       storage: {
         getProjectDir: () => tempDir,
       },
-      getBackgroundTaskRegistry: () => registry,
+      getTaskRegistry: () => registry,
       getSubagentManager: () => subagentManager,
       getHookSystem: () => hookSystem,
       getApprovalMode: () => 'default',
@@ -388,7 +394,7 @@ describe('BackgroundAgentResumeService', () => {
       'utf8',
     );
 
-    registry.register({
+    agentRegister(registry, {
       agentId,
       description: 'Resume with hooks',
       subagentType: 'researcher',
@@ -477,7 +483,7 @@ describe('BackgroundAgentResumeService', () => {
       'utf8',
     );
 
-    registry.register({
+    agentRegister(registry, {
       agentId,
       description: 'Resume stop hook path',
       subagentType: 'researcher',
@@ -554,7 +560,7 @@ describe('BackgroundAgentResumeService', () => {
       'utf8',
     );
 
-    registry.register({
+    agentRegister(registry, {
       agentId,
       description: 'Resume after trust revoked',
       subagentType: 'researcher',
@@ -624,7 +630,7 @@ describe('BackgroundAgentResumeService', () => {
       'utf8',
     );
 
-    registry.register({
+    agentRegister(registry, {
       agentId,
       description: 'Resume once',
       subagentType: 'researcher',
@@ -751,7 +757,7 @@ describe('BackgroundAgentResumeService', () => {
       'utf8',
     );
 
-    registry.register({
+    agentRegister(registry, {
       agentId,
       description: launchPrompt,
       subagentType: FORK_SUBAGENT_TYPE,
@@ -847,7 +853,7 @@ describe('BackgroundAgentResumeService', () => {
       'utf8',
     );
 
-    registry.register({
+    agentRegister(registry, {
       agentId,
       description: 'Legacy fork task',
       subagentType: FORK_SUBAGENT_TYPE,
@@ -866,7 +872,7 @@ describe('BackgroundAgentResumeService', () => {
 
     expect(resumed).toBeUndefined();
     expect(registry.get(agentId)?.status).toBe('paused');
-    expect(registry.get(agentId)?.resumeBlockedReason).toContain(
+    expect(getAgentTask(registry, agentId)?.resumeBlockedReason).toContain(
       'bootstrap transcript is missing',
     );
     expect(registry.get(agentId)?.error).toBeUndefined();
@@ -929,7 +935,7 @@ describe('BackgroundAgentResumeService', () => {
       'utf8',
     );
 
-    registry.register({
+    agentRegister(registry, {
       agentId,
       description: 'Legacy fork task without capabilities',
       subagentType: FORK_SUBAGENT_TYPE,
@@ -948,7 +954,7 @@ describe('BackgroundAgentResumeService', () => {
 
     expect(resumed).toBeUndefined();
     expect(registry.get(agentId)?.status).toBe('paused');
-    expect(registry.get(agentId)?.resumeBlockedReason).toContain(
+    expect(getAgentTask(registry, agentId)?.resumeBlockedReason).toContain(
       'runtime constraints are missing',
     );
     expect(createSpy).not.toHaveBeenCalled();
@@ -971,7 +977,7 @@ describe('BackgroundAgentResumeService', () => {
       resolvedApprovalMode: 'default',
     });
 
-    registry.register({
+    agentRegister(registry, {
       agentId,
       description: 'Interrupted by shutdown',
       subagentType: 'researcher',
@@ -984,7 +990,7 @@ describe('BackgroundAgentResumeService', () => {
       isBackgrounded: true,
     });
 
-    registry.abortAll();
+    agentAbortAll(registry);
 
     expect(readMetaStatus(metaPath)).toBe('running');
   });
@@ -1019,7 +1025,7 @@ describe('BackgroundAgentResumeService', () => {
       'utf8',
     );
 
-    registry.register({
+    agentRegister(registry, {
       agentId,
       description: 'Resume then shutdown',
       subagentType: 'researcher',
@@ -1056,7 +1062,7 @@ describe('BackgroundAgentResumeService', () => {
 
     const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
     expect(resumed).toBeDefined();
-    registry.abortAll();
+    agentAbortAll(registry);
     releaseExecute?.();
     await vi.waitFor(() => {
       expect(registry.get(agentId)?.status).toBe('cancelled');
@@ -1094,7 +1100,7 @@ describe('BackgroundAgentResumeService', () => {
       'utf8',
     );
 
-    registry.register({
+    agentRegister(registry, {
       agentId,
       description: 'Resume then cancel',
       subagentType: 'researcher',
@@ -1131,7 +1137,7 @@ describe('BackgroundAgentResumeService', () => {
 
     const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
     expect(resumed).toBeDefined();
-    registry.cancel(agentId);
+    agentCancel(registry, agentId);
     releaseExecute?.();
     await vi.waitFor(() => {
       expect(registry.get(agentId)?.status).toBe('cancelled');
@@ -1187,7 +1193,7 @@ describe('BackgroundAgentResumeService', () => {
       'utf8',
     );
 
-    registry.register({
+    agentRegister(registry, {
       agentId,
       description: 'Pending user tail',
       subagentType: 'researcher',

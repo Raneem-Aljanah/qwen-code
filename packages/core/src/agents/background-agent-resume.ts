@@ -39,7 +39,18 @@ import type {
   AgentCompletionStats,
   AgentTask,
   AgentTaskRegistration,
-} from './background-tasks.js';
+} from './tasks/agent-task.js';
+import {
+  agentAppendActivity,
+  agentAbandon,
+  agentComplete,
+  agentDrainMessages,
+  agentFail,
+  agentFinalizeCancelled,
+  agentQueueMessage,
+  agentRegister,
+  getAgentTask,
+} from './tasks/agent-task.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import type {
   PromptConfig,
@@ -368,7 +379,7 @@ export class BackgroundAgentResumeService {
       throw error;
     }
 
-    const registry = this.config.getBackgroundTaskRegistry();
+    const registry = this.config.getTaskRegistry();
     const recovered: AgentTask[] = [];
 
     for (const fileName of files) {
@@ -377,7 +388,7 @@ export class BackgroundAgentResumeService {
       try {
         const meta = readAgentMeta(metaPath);
         if (!meta || meta.status !== 'running') continue;
-        if (registry.get(meta.agentId)) continue;
+        if (getAgentTask(registry, meta.agentId)) continue;
         const subagentName = meta.subagentName ?? meta.agentType;
         if (!subagentName) continue;
         const target = await this.resolveResumeTarget(subagentName);
@@ -417,7 +428,7 @@ export class BackgroundAgentResumeService {
             meta.lastError === resumeBlockedReason ? undefined : meta.lastError,
           resumeBlockedReason,
         };
-        const entry = registry.register(registration);
+        const entry = agentRegister(registry, registration);
         recovered.push(entry);
       } catch (error) {
         debugLogger.warn(
@@ -438,8 +449,8 @@ export class BackgroundAgentResumeService {
     const existingOperation = this.resumeOperations.get(agentId);
     if (existingOperation) {
       if (trimmedMessage) {
-        const registry = this.config.getBackgroundTaskRegistry();
-        if (!registry.queueMessage(agentId, trimmedMessage)) {
+        const registry = this.config.getTaskRegistry();
+        if (!agentQueueMessage(registry, agentId, trimmedMessage)) {
           existingOperation.continuationMessages.push(trimmedMessage);
         }
       }
@@ -464,8 +475,8 @@ export class BackgroundAgentResumeService {
     agentId: string,
     operation: ResumeOperation,
   ): Promise<AgentTask | undefined> {
-    const registry = this.config.getBackgroundTaskRegistry();
-    const existing = registry.get(agentId);
+    const registry = this.config.getTaskRegistry();
+    const existing = getAgentTask(registry, agentId);
     if (!existing || existing.status !== 'paused') {
       return existing;
     }
@@ -483,7 +494,7 @@ export class BackgroundAgentResumeService {
 
     const bgAbortController = new AbortController();
 
-    registry.register({
+    agentRegister(registry, {
       ...existing,
       status: 'running',
       abortController: bgAbortController,
@@ -635,7 +646,7 @@ export class BackgroundAgentResumeService {
       });
 
       const pendingMessages = [
-        ...(registry.get(meta.agentId)?.pendingMessages ?? []),
+        ...(getAgentTask(registry, meta.agentId)?.pendingMessages ?? []),
       ];
       const registration: AgentTaskRegistration = {
         ...existing,
@@ -652,16 +663,16 @@ export class BackgroundAgentResumeService {
         recentActivities: [],
         pendingMessages,
       };
-      const entry = registry.register(registration);
+      const entry = agentRegister(registry, registration);
       const lateContinuationMessages = operation.continuationMessages.slice(
         promptMessages.length,
       );
       for (const message of lateContinuationMessages) {
-        registry.queueMessage(meta.agentId, message);
+        agentQueueMessage(registry, meta.agentId, message);
       }
 
       subagent.setExternalMessageProvider(() =>
-        registry.drainMessages(meta.agentId),
+        agentDrainMessages(registry, meta.agentId),
       );
 
       const hookSystem = this.config.getHookSystem();
@@ -678,14 +689,14 @@ export class BackgroundAgentResumeService {
       let liveToolCallCount = 0;
 
       const refreshLiveStats = () => {
-        const target = registry.get(meta.agentId);
+        const target = getAgentTask(registry, meta.agentId);
         if (!target || target.status !== 'running') return;
         target.stats = getCompletionStats(subagent, liveToolCallCount);
       };
       const onToolCall = (event: AgentToolCallEvent) => {
         liveToolCallCount += 1;
         refreshLiveStats();
-        registry.appendActivity(meta.agentId, {
+        agentAppendActivity(registry, meta.agentId, {
           name: event.name,
           description: event.description,
           at: event.timestamp,
@@ -716,23 +727,23 @@ export class BackgroundAgentResumeService {
           const finalText = subagent.getFinalText();
           const stats = getCompletionStats(subagent, liveToolCallCount);
           if (terminateMode === AgentTerminateMode.GOAL) {
-            registry.complete(meta.agentId, finalText, stats);
+            agentComplete(registry, meta.agentId, finalText, stats);
             patchAgentMeta(metaPath, {
               status: 'completed',
               lastUpdatedAt: new Date().toISOString(),
               lastError: undefined,
             });
           } else if (terminateMode === AgentTerminateMode.CANCELLED) {
-            registry.finalizeCancelled(meta.agentId, finalText, stats);
+            agentFinalizeCancelled(registry, meta.agentId, finalText, stats);
             persistBackgroundCancellation(
               metaPath,
-              registry.get(meta.agentId)?.persistedCancellationStatus ??
-                'cancelled',
+              getAgentTask(registry, meta.agentId)
+                ?.persistedCancellationStatus ?? 'cancelled',
             );
           } else {
             const failureText =
               finalText || `Agent terminated with mode: ${terminateMode}`;
-            registry.fail(meta.agentId, failureText, stats);
+            agentFail(registry, meta.agentId, failureText, stats);
             patchAgentMeta(metaPath, {
               status: 'failed',
               lastUpdatedAt: new Date().toISOString(),
@@ -746,18 +757,20 @@ export class BackgroundAgentResumeService {
             `[BackgroundAgentResume] Background agent failed: ${errorMessage}`,
           );
           if (bgAbortController.signal.aborted) {
-            registry.finalizeCancelled(
+            agentFinalizeCancelled(
+              registry,
               meta.agentId,
               errorMessage,
               getCompletionStats(subagent, liveToolCallCount),
             );
             persistBackgroundCancellation(
               metaPath,
-              registry.get(meta.agentId)?.persistedCancellationStatus ??
-                'cancelled',
+              getAgentTask(registry, meta.agentId)
+                ?.persistedCancellationStatus ?? 'cancelled',
             );
           } else {
-            registry.fail(
+            agentFail(
+              registry,
               meta.agentId,
               errorMessage,
               getCompletionStats(subagent, liveToolCallCount),
@@ -798,10 +811,10 @@ export class BackgroundAgentResumeService {
         lastError: errorMessage,
         lastUpdatedAt: new Date().toISOString(),
       });
-      const latest = registry.get(agentId);
+      const latest = getAgentTask(registry, agentId);
       if (latest?.status === 'running') {
         if (latest.abortController.signal.aborted) {
-          registry.finalizeCancelled(agentId, errorMessage);
+          agentFinalizeCancelled(registry, agentId, errorMessage);
         } else {
           this.restorePausedEntry(agentId, { error: errorMessage });
         }
@@ -811,8 +824,8 @@ export class BackgroundAgentResumeService {
   }
 
   abandonBackgroundAgent(agentId: string): boolean {
-    const registry = this.config.getBackgroundTaskRegistry();
-    const entry = registry.get(agentId);
+    const registry = this.config.getTaskRegistry();
+    const entry = getAgentTask(registry, agentId);
     if (!entry || entry.status !== 'paused' || !entry.metaPath) {
       return false;
     }
@@ -822,7 +835,7 @@ export class BackgroundAgentResumeService {
       lastUpdatedAt: new Date().toISOString(),
       lastError: undefined,
     });
-    registry.abandon(agentId);
+    agentAbandon(registry, agentId);
     return true;
   }
 
@@ -863,8 +876,8 @@ export class BackgroundAgentResumeService {
     agentId: string,
     options: RestorePausedEntryOptions = {},
   ): AgentTask | undefined {
-    const registry = this.config.getBackgroundTaskRegistry();
-    const latest = registry.get(agentId);
+    const registry = this.config.getTaskRegistry();
+    const latest = getAgentTask(registry, agentId);
     if (!latest) return undefined;
 
     const registration: AgentTaskRegistration = {
@@ -880,7 +893,7 @@ export class BackgroundAgentResumeService {
       recentActivities: [],
       pendingMessages: [...(latest.pendingMessages ?? [])],
     };
-    return registry.register(registration);
+    return agentRegister(registry, registration);
   }
 
   private async createResumedForkSubagent(
