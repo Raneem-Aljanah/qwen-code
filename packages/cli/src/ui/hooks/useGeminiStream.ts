@@ -704,7 +704,11 @@ export const useGeminiStream = (
         // a duplicate `> …` line. Preprocessing (@/slash/shell) still runs.
         if (submitType !== SendMessageType.Cron) {
           addItem(
-            { type: MessageType.USER, text: trimmedQuery, promptId: prompt_id },
+            {
+              type: MessageType.USER,
+              text: trimmedQuery,
+              promptId: prompt_id,
+            } as HistoryItemWithoutId,
             userMessageTimestamp,
           );
         }
