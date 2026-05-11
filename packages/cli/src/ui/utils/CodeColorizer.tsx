@@ -6,7 +6,6 @@
 
 import React from 'react';
 import { Text, Box } from 'ink';
-import { common, createLowlight } from 'lowlight';
 import type {
   Root,
   Element,
@@ -23,9 +22,44 @@ import {
 import type { LoadedSettings } from '../../config/settings.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
-// Configure theming and parsing utilities.
-const lowlight = createLowlight(common);
 const debugLogger = createDebugLogger('CODE_COLORIZER');
+
+// Lowlight is heavy (~1.5 MB bundled, ~36–60 ms V8 parse). Defer its load via
+// dynamic import so it lives in a separate esbuild chunk that's only parsed
+// once a code block actually needs highlighting. Callers see plain text for
+// the very first render and the highlighted version once React next re-renders
+// the surrounding subtree (typically on the next user keystroke or message).
+type Lowlight = {
+  registered(language: string): boolean;
+  highlight(language: string, value: string): Root;
+  highlightAuto(value: string): Root;
+};
+
+let lowlightInstance: Lowlight | null = null;
+let lowlightLoad: Promise<Lowlight> | null = null;
+
+/**
+ * Kicks off (or returns the in-flight) load of the lowlight chunk. Exported
+ * so test-setup can `await` it once to keep snapshot tests deterministic;
+ * production callers don't invoke it directly — `colorizeCode` / `colorizeLine`
+ * trigger the load on first use and the highlighted version appears on the
+ * next React render of the surrounding subtree.
+ */
+export function loadLowlight(): Promise<Lowlight> {
+  if (lowlightInstance) return Promise.resolve(lowlightInstance);
+  if (lowlightLoad) return lowlightLoad;
+  lowlightLoad = import('lowlight')
+    .then((mod) => {
+      lowlightInstance = mod.createLowlight(mod.common) as Lowlight;
+      return lowlightInstance;
+    })
+    .catch((err) => {
+      debugLogger.error('[CodeColorizer] failed to load lowlight:', err);
+      lowlightLoad = null;
+      throw err;
+    });
+  return lowlightLoad;
+}
 
 function renderHastNode(
   node: Root | Element | HastText | RootContent,
@@ -97,11 +131,23 @@ function highlightAndRenderLine(
   language: string | null,
   theme: Theme,
 ): React.ReactNode {
+  // Trigger the lazy load on first use; until it resolves, fall back to a
+  // plain-text rendering of the line. The next React render of the
+  // surrounding subtree will pick up the highlighted version.
+  if (!lowlightInstance) {
+    if (!lowlightLoad) {
+      void loadLowlight().catch(() => {
+        /* surfaced via instance fallback */
+      });
+    }
+    return line;
+  }
+  const ll = lowlightInstance;
   try {
     const getHighlightedLine = () =>
-      !language || !lowlight.registered(language)
-        ? lowlight.highlightAuto(line)
-        : lowlight.highlight(language, line);
+      !language || !ll.registered(language)
+        ? ll.highlightAuto(line)
+        : ll.highlight(language, line);
 
     const renderedNode = renderHastNode(getHighlightedLine(), theme, undefined);
 
