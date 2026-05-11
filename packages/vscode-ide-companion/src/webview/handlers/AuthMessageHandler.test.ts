@@ -58,4 +58,35 @@ describe('AuthMessageHandler', () => {
 
     expect(sendToWebView).toHaveBeenCalledWith({ type: 'authCancelled' });
   });
+
+  it('routes Token Plan auth directly to api key collection', async () => {
+    mockShowQuickPick.mockResolvedValueOnce({ value: 'token-plan' });
+    mockShowInputBox.mockResolvedValueOnce('token-plan-key');
+
+    const sendToWebView = vi.fn();
+    const authInteractiveHandler = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+    );
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    expect(mockShowInputBox).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Qwen Code: Token Plan API Key',
+        prompt: 'Enter your Token Plan API key',
+        password: true,
+      }),
+    );
+    expect(authInteractiveHandler).toHaveBeenCalledWith(
+      'token-plan',
+      undefined,
+      'token-plan-key',
+    );
+    expect(sendToWebView).not.toHaveBeenCalledWith({ type: 'authCancelled' });
+  });
 });

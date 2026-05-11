@@ -26,11 +26,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 import { AuthType } from '@qwen-code/qwen-code-core';
-import { CODING_PLAN_ENV_KEY } from './subscriptionPlanDefinitions.js';
+import {
+  CODING_PLAN_ENV_KEY,
+  TOKEN_PLAN_ENV_KEY,
+} from './subscriptionPlanDefinitions.js';
 import {
   readQwenSettingsForVSCode,
   writeCodingPlanConfig,
   writeModelProvidersConfig,
+  writeTokenPlanConfig,
 } from './settingsWriter.js';
 
 describe('settingsWriter', () => {
@@ -102,5 +106,63 @@ describe('settingsWriter', () => {
       apiKey: 'manual-key',
       codingPlanRegion: 'china',
     });
+  });
+
+  it('writes Token Plan config with the CLI Token Plan model template', () => {
+    const vscodeModelProviders = writeTokenPlanConfig('token-plan-key');
+
+    const settings = JSON.parse(
+      fs.readFileSync(settingsPath, 'utf-8'),
+    ) as Record<string, unknown>;
+    const env = settings.env as Record<string, string>;
+    const modelProviders = settings.modelProviders as Record<string, unknown>;
+    const openaiModels = modelProviders[AuthType.USE_OPENAI] as Array<
+      Record<string, string>
+    >;
+    const expectedModelIds = [
+      'qwen3.6-plus',
+      'deepseek-v3.2',
+      'glm-5',
+      'MiniMax-M2.5',
+    ];
+
+    expect(env[TOKEN_PLAN_ENV_KEY]).toBe('token-plan-key');
+    expect(settings.model).toEqual({ name: 'qwen3.6-plus' });
+    expect(Object.keys(vscodeModelProviders)).toEqual(expectedModelIds);
+    expect(openaiModels.map((model) => model.id)).toEqual(expectedModelIds);
+    expect(
+      openaiModels.every((model) => model.envKey === TOKEN_PLAN_ENV_KEY),
+    ).toBe(true);
+  });
+
+  it('clears stale sibling subscription plan credentials when switching plans', () => {
+    writeCodingPlanConfig('global', 'coding-plan-key');
+    writeTokenPlanConfig('token-plan-key');
+
+    let settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as Record<
+      string,
+      unknown
+    >;
+    let env = settings.env as Record<string, string>;
+    let providerMetadata = settings.providerMetadata as Record<string, unknown>;
+
+    expect(env[CODING_PLAN_ENV_KEY]).toBeUndefined();
+    expect(env[TOKEN_PLAN_ENV_KEY]).toBe('token-plan-key');
+    expect(providerMetadata['coding-plan']).toBeUndefined();
+    expect(providerMetadata['token-plan']).toBeDefined();
+
+    writeCodingPlanConfig('china', 'new-coding-plan-key');
+
+    settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as Record<
+      string,
+      unknown
+    >;
+    env = settings.env as Record<string, string>;
+    providerMetadata = settings.providerMetadata as Record<string, unknown>;
+
+    expect(env[TOKEN_PLAN_ENV_KEY]).toBeUndefined();
+    expect(env[CODING_PLAN_ENV_KEY]).toBe('new-coding-plan-key');
+    expect(providerMetadata['token-plan']).toBeUndefined();
+    expect(providerMetadata['coding-plan']).toBeDefined();
   });
 });
