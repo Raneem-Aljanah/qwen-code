@@ -1026,6 +1026,16 @@ export class GeminiClient {
           CommitAttributionService.getInstance().toSnapshot(),
         );
 
+      if (messageType === SendMessageType.UserQuery) {
+        try {
+          await this.config
+            .getFileHistoryService()
+            .makeSnapshot(prompt_id);
+        } catch (e) {
+          debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
+        }
+      }
+
       this.sessionTurnCount++;
 
       if (
